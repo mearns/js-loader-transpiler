@@ -1,2 +1,2 @@
-import {demo} from './main';
-demo();
+import {cli} from './cli';
+cli();

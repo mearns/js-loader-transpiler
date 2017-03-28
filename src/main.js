@@ -1,38 +1,132 @@
 /* eslint no-console:0 */
 
-import {readFile, stat} from 'mz/fs';
+import {readFile, writeFile, stat} from 'mz/fs';
 import Promise from 'bluebird';
 import packageJson from '../../package.json';
-import path, {dirname} from 'path';
+import path from 'path';
 import resolve from 'resolve';
 import {cwd} from 'process';
 import * as R from 'ramda';
 import _ from 'lodash';
+import walk from 'walk';
+import _mkdirp from 'mkdirp';
 
 require('require-ensure');
+
+const mkdirp = Promise.promisify(_mkdirp);
 
 const PROJECT_NAME = packageJson.name;
 const LOADER_API_VERSION = 1;
 
-export function demo() {
-    console.log('------------------------');
-    return transpile({
-        rootDir: './demo',
-        resourceSpec: {
-            name: 'config.yaml'
-        },
-        loaderSpecs: [
-            {
-                name: 'yaml-loader',
-                query: '?foo=bar'
+export function main(config) {
+
+    // TODO: Handler option to transform input path to output path
+    // TODO: An array of configs.
+    // TODO: Promise for a config.
+    // TODO: Function that returns a config (or array of, or promise for).
+
+    const {rootDir = '.', sourceDir: _sourceDir = '.', destDir: _destDir, handlers = []} = config;
+    if (!_destDir) {
+        throw new Error('The "destDir" config property is required');
+    }
+    const sourceDir = path.resolve(rootDir, _sourceDir);
+    const destDir = path.resolve(rootDir, _destDir);
+
+    function processOneModule(directory, fileName) {
+        const filePath = path.resolve(directory, fileName);
+        const selectedHandlers = handlers
+            .filter(({test}) => {
+                if (test instanceof RegExp) {
+                    return test.test(filePath);
+                }
+                else if (typeof test === 'function') {
+                    return test(filePath);
+                }
+                return false;
+            });
+        const loaderSpecs = _.flatMap(selectedHandlers, ({loaders}) => {
+            // TODO: Parse queries from loaderName
+            // TODO: Accept objects as loaders.
+            // TODO: Accept functions as loaders.
+            return loaders.map((loaderName) => {
+                return {
+                    name: loaderName
+                };
+            });
+        });
+        return transpile({
+            rootDir,
+            context: directory,
+            resourceSpec: {
+                name: fileName
             },
-            {
-                name: 'json-loader'
-            },
-        ]
+            loaderSpecs
+        })
+            .then((output) => {
+                // XXX: TODO: Convert between strings and buffers after each loader.
+                const sourcePath = path.resolve(directory, fileName);
+                const relativePath = path.relative(sourceDir, sourcePath);
+                const outputPath = path.resolve(destDir, relativePath);
+                const outputDir = path.dirname(outputPath);
+                return mkdirp(outputDir)
+                    .then(() => writeFile(outputPath, output))
+                    .catch((error) => {
+                        throw new Error(`Error trying to write output to "${outputPath}": ${error}`);
+                    })
+                    .then(() => ({
+                        source: sourcePath,
+                        dest: outputPath
+                    }));
+            });
+    }
+
+    return new Promise((fulfill, reject) => {
+        const walker = walk.walk(sourceDir);
+        const processing = [];
+        const processed = [];
+        const errors = [];
+
+        walker.on('file', (root, stats, next) => {
+            processing.push(
+                processOneModule(root, stats.name)
+                    .then((result) => processed.push(result))
+                    .catch((error) => {
+                        errors.push(
+                            new Error(
+                                `Error occurred processing module "${path.resolve(root, stats.name)}": ${error}`));
+                    })
+            );
+            next();
+        });
+
+        walker.on('errors', (root, statsArray, next) => {
+            errors.push(new Error(`Error occurred walking file system: ${statsArray.error}`));
+            next();
+        });
+
+        walker.on('end', () => {
+            Promise.all(processing)
+                .then(() => {
+                    if (errors.length) {
+                        const error = new Error('Errors occurred processing modules');
+                        error.errors = errors;
+                        reject(error);
+                    }
+                    else {
+                        fulfill(processed);
+                    }
+                });
+        });
     })
-        .tap(() => console.log('XXXXXXXXXXXXXXXXXXXXXX'))
-        .then(({content}) => console.log(content));
+        .catch((error) => {
+            if (error.errors) {
+                error.errors.forEach((e) => console.error(e));
+            }
+            throw error;
+        })
+        .then((processed) => {
+            processed.forEach((module) => console.log(module));
+        });
 }
 
 function unimplemented(feature) {
@@ -161,7 +255,7 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
     function resolveLoaders(packageData) {
         const resolveOpts = {
             package: packageData,
-            basedir: cwd()
+            basedir: rootDir
         };
         return Promise.map(loaderSpecs, R.partial(resolveOneLoader, [resolveOpts]));
     }
@@ -236,5 +330,6 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
                 content: sourceContent
             }));
         }
-    );
+    )
+        .then(R.prop('content'));
 }

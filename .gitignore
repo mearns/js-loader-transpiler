@@ -3,6 +3,7 @@ dist/
 versions/
 node_modules/
 demo/node_modules/
+demo/output/
 alias/
 
 
