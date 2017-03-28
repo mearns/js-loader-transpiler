@@ -1,23 +1,10 @@
 build/
-config/local.*
-coverage/
 dist/
 versions/
 node_modules/
-xunit.xml
-reports/
-bombbag/
-acceptance-tests/config/acceptance-tests-config.yml
-acceptance-tests/bin/BrowserStackLocalLinux-64bit-latest.zip
-acceptance-tests/bin/BrowserStackLocal-darwin-x64.zip
-acceptance-tests/dist/
-browser_stack_tunnel.log
-browser_stack_tunnel.pid
-
+demo/node_modules/
 alias/
-ci-artifacts/
-.tmp-globalize-webpack/
-majora.log
+
 
 #----------------------------------------#
 # General Patterns                       #
