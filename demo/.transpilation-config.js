@@ -6,6 +6,7 @@ module.exports = {
     handlers: [
         {
             test: /\.ya?ml$/i,
+            output: (basePath) => basePath,
             loaders: [
                 'yaml-loader',
                 'json-loader'

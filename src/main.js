@@ -18,12 +18,44 @@ const mkdirp = Promise.promisify(_mkdirp);
 const PROJECT_NAME = packageJson.name;
 const LOADER_API_VERSION = 1;
 
+function applyTest(test, filePath) {
+    if (test instanceof RegExp) {
+        return test.test(filePath);
+    }
+    else if (typeof test === 'function') {
+        return test(filePath);
+    }
+    else if (typeof test === 'boolean') {
+        return test;
+    }
+    else if (test === null || _.isUndefined(test)) {
+        return filePath;
+    }
+    return false;
+}
+
+function applyOutputFunction(output, relativeSourcePath, fileInfo) {
+    if (output === null || _.isUndefined(output)) {
+        return relativeSourcePath;
+    }
+    else if (typeof output === 'function') {
+        return output(relativeSourcePath, fileInfo);
+    }
+    else if (typeof output === 'string') {
+        return output;
+    }
+    return false;
+}
+
 export function main(config) {
 
     // TODO: Handler option to transform input path to output path
     // TODO: An array of configs.
     // TODO: Promise for a config.
     // TODO: Function that returns a config (or array of, or promise for).
+    // TODO: Support a "tee" option for each loader to write the output to a file.
+    // TODO: Check for multiple handlers writing to the same output.
+    // TODO: Add a CLI option for --unmatched-files with values of "copy", "ignore", "warn", and "error"
 
     const {rootDir = '.', sourceDir: _sourceDir = '.', destDir: _destDir, handlers = []} = config;
     if (!_destDir) {
@@ -33,51 +65,61 @@ export function main(config) {
     const destDir = path.resolve(rootDir, _destDir);
 
     function processOneModule(directory, fileName) {
-        const filePath = path.resolve(directory, fileName);
+        const absoluteSourcePath = path.resolve(directory, fileName);
+        const relativeSourcePath = path.relative(sourceDir, absoluteSourcePath);
+
         const selectedHandlers = handlers
-            .filter(({test}) => {
-                if (test instanceof RegExp) {
-                    return test.test(filePath);
+            .map((handler) => {
+                const testResult = applyTest(handler.test, relativeSourcePath);
+                if (testResult) {
+                    const outputPath = applyOutputFunction(handler.output, relativeSourcePath, {
+                        testResult, sourceDir, destDir, absoluteSourcePath
+                    });
+                    if (outputPath) {
+                        return Object.assign({}, _.pick(handler, ['loaders']), {
+                            outputPath: path.resolve(destDir, outputPath)
+                        });
+                    }
                 }
-                else if (typeof test === 'function') {
-                    return test(filePath);
-                }
-                return false;
-            });
-        const loaderSpecs = _.flatMap(selectedHandlers, ({loaders}) => {
-            // TODO: Parse queries from loaderName
-            // TODO: Accept objects as loaders.
-            // TODO: Accept functions as loaders.
-            return loaders.map((loaderName) => {
-                return {
+                return null;
+            })
+            .filter(R.complement(R.isNil));
+
+        selectedHandlers.reduce((byOutput, handler) => {
+            if (byOutput[handler.outputPath]) {
+                throw new Error(
+                    `Multiple handlers are targeting the same output for input file "${relativeSourcePath}"`);
+            }
+            byOutput[handler.outputPath] = handler;
+        }, {});
+
+        return Promise.map(selectedHandlers, ({outputPath, loaders}) => {
+            return transpile({
+                rootDir,
+                context: directory,
+                resourceSpec: {
+                    name: fileName
+                },
+                loaderSpecs: loaders.map((loaderName) => ({
+                    // TODO: Parse queries from loaderName
+                    // TODO: Accept objects as loaders.
                     name: loaderName
-                };
-            });
+                }))
+            })
+                .then((output) => {
+                    const outputDir = path.dirname(outputPath);
+                    // XXX: TODO: Convert between strings and buffers after each loader.
+                    return mkdirp(outputDir)
+                        .then(() => writeFile(outputPath, output))
+                        .catch((error) => {
+                            throw new Error(`Error trying to write output to "${outputPath}": ${error}`);
+                        })
+                        .then(() => ({
+                            source: absoluteSourcePath,
+                            dest: outputPath
+                        }));
+                });
         });
-        return transpile({
-            rootDir,
-            context: directory,
-            resourceSpec: {
-                name: fileName
-            },
-            loaderSpecs
-        })
-            .then((output) => {
-                // XXX: TODO: Convert between strings and buffers after each loader.
-                const sourcePath = path.resolve(directory, fileName);
-                const relativePath = path.relative(sourceDir, sourcePath);
-                const outputPath = path.resolve(destDir, relativePath);
-                const outputDir = path.dirname(outputPath);
-                return mkdirp(outputDir)
-                    .then(() => writeFile(outputPath, output))
-                    .catch((error) => {
-                        throw new Error(`Error trying to write output to "${outputPath}": ${error}`);
-                    })
-                    .then(() => ({
-                        source: sourcePath,
-                        dest: outputPath
-                    }));
-            });
     }
 
     return new Promise((fulfill, reject) => {
