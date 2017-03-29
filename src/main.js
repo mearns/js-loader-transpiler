@@ -91,6 +91,7 @@ export function main(config) {
                     `Multiple handlers are targeting the same output for input file "${relativeSourcePath}"`);
             }
             byOutput[handler.outputPath] = handler;
+            return byOutput;
         }, {});
 
         return Promise.map(selectedHandlers, ({outputPath, loaders}) => {
@@ -256,7 +257,7 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
         return Promise.resolve(readFile(sourcePath))
             .catch((error) => {
                 throw new Error(`Failed to read file "${sourcePath}": ${error}`);
-            });
+            })
     }
 
     function readPackageJson() {
@@ -358,7 +359,11 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
                             reject(error);
                         }
                         else {
-                            fulfill({content: result, value: loaderContext.value});
+                            // XXX: FIXME: The JSON loader is outputting a buffer directly to file, it seems.
+                            fulfill({
+                                content: result && result.toString ? result.toString() : result,
+                                value: loaderContext.value
+                            });
                         }
                     }
 
