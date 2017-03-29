@@ -109,16 +109,18 @@ export function main(config) {
             })
                 .then((output) => {
                     const outputDir = path.dirname(outputPath);
-                    // XXX: TODO: Convert between strings and buffers after each loader.
                     return mkdirp(outputDir)
                         .then(() => writeFile(outputPath, output))
                         .catch((error) => {
-                            throw new Error(`Error trying to write output to "${outputPath}": ${error}`);
+                            throw wrapError(`Error trying to write output to "${outputPath}"`, error);
                         })
-                        .then(() => ({
-                            source: absoluteSourcePath,
-                            dest: outputPath
-                        }));
+                        .then(() => {
+                            console.log(`transpiled: ${absoluteSourcePath} --> ${outputPath}`);
+                            return {
+                                source: absoluteSourcePath,
+                                dest: outputPath
+                            };
+                        });
                 });
         });
     }
@@ -135,15 +137,15 @@ export function main(config) {
                     .then((result) => processed.push(result))
                     .catch((error) => {
                         errors.push(
-                            new Error(
-                                `Error occurred processing module "${path.resolve(root, stats.name)}": ${error}`));
+                            wrapError(
+                                `Error occurred processing input file "${path.resolve(root, stats.name)}"`, error));
                     })
             );
             next();
         });
 
         walker.on('errors', (root, statsArray, next) => {
-            errors.push(new Error(`Error occurred walking file system: ${statsArray.error}`));
+            errors.push(wrapError('Error occurred walking file system', statsArray.error));
             next();
         });
 
@@ -163,12 +165,9 @@ export function main(config) {
     })
         .catch((error) => {
             if (error.errors) {
-                error.errors.forEach((e) => console.error(e));
+                error.errors.forEach((e) => console.error(e.message));
             }
             throw error;
-        })
-        .then((processed) => {
-            processed.forEach((module) => console.log(module));
         });
 }
 
@@ -258,6 +257,9 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
             .catch((error) => {
                 throw new Error(`Failed to read file "${sourcePath}": ${error}`);
             })
+            .then((contentBuffer) => {
+                return contentBuffer.toString();
+            });
     }
 
     function readPackageJson() {
@@ -333,7 +335,7 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
                 emitFile: unimplemented('The "emitFile" function')
             };
 
-            return resolvedLoaderSpecs.reduce((chain, {module, query, data}, loaderIndex) => {
+            return resolvedLoaderSpecs.reduce((chain, {name, module, query, data}, loaderIndex) => {
                 return chain.then(({content, inputValue}) => {
                     const loaderContext = Object.assign({}, baseContext, {
                         query,
@@ -354,22 +356,26 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
                         fulfill = _fulfill;
                         reject = _reject;
                     });
-                    function callback(error, result) {
+                    function callback(error, newContent) {
                         if (error) {
                             reject(error);
                         }
                         else {
-                            // XXX: FIXME: The JSON loader is outputting a buffer directly to file, it seems.
                             fulfill({
-                                content: result && result.toString ? result.toString() : result,
+                                content: String(newContent),
                                 value: loaderContext.value
                             });
                         }
                     }
 
-                    const newContent = module.bind(loaderContext)(content);
-                    if (!_.isUndefined(newContent)) {
-                        callback(null, newContent);
+                    try {
+                        const newContent = module.bind(loaderContext)(content);
+                        if (!_.isUndefined(newContent)) {
+                            callback(null, newContent);
+                        }
+                    }
+                    catch (error) {
+                        throw wrapError(`Error applying loader ${name}`, error);
                     }
                     return promise;
                 });
@@ -379,4 +385,10 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
         }
     )
         .then(R.prop('content'));
+}
+
+function wrapError(message, error) {
+    const wrapper = new Error(`${message}: ${error.message || error}`);
+    wrapper.cause = error;
+    return wrapper;
 }

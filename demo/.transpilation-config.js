@@ -6,7 +6,6 @@ module.exports = {
     handlers: [
         {
             test: /\.ya?ml$/i,
-            output: (basePath) => `${basePath}.js`,
             loaders: [
                 'yaml-loader',
                 'json-loader'
@@ -15,7 +14,7 @@ module.exports = {
         {
             test: /\.ya?ml$/i,
             output: (basePath) => `${basePath}.json`,
-            loaders: ['json-loader']
+            loaders: ['yaml-loader']
         }
     ]
 };
