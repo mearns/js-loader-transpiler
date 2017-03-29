@@ -47,9 +47,29 @@ function applyOutputFunction(output, relativeSourcePath, fileInfo) {
     return false;
 }
 
+function loaderSpecFromDef(loaderDef) {
+    // TODO: Parse queries from loaderName
+    if (typeof loaderDef === 'string') {
+        return {
+            name: loaderDef
+        };
+    }
+    else if (typeof loaderDef === 'function') {
+        return {
+            module: loaderDef
+        };
+    }
+    else if (typeof loaderDef === 'object') {
+        return Object.assign({}, loaderSpecFromDef(loaderDef.loader),
+            _.pick(loaderDef, ['name', 'query']));
+    }
+    else {
+        throw new Error(`Unexpected value for loaderDef: ${loaderDef}`);
+    }
+}
+
 export function main(config) {
 
-    // TODO: Handler option to transform input path to output path
     // TODO: An array of configs.
     // TODO: Promise for a config.
     // TODO: Function that returns a config (or array of, or promise for).
@@ -101,11 +121,7 @@ export function main(config) {
                 resourceSpec: {
                     name: fileName
                 },
-                loaderSpecs: loaders.map((loaderName) => ({
-                    // TODO: Parse queries from loaderName
-                    // TODO: Accept objects as loaders.
-                    name: loaderName
-                }))
+                loaderSpecs: loaders.map(loaderSpecFromDef)
             })
                 .then((output) => {
                     const outputDir = path.dirname(outputPath);
@@ -248,7 +264,8 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
 
     const rootDir = _rootDir || cwd();
     const context = path.resolve(rootDir, _context || '.');
-    const {name: resourceName, query: resourceQuery} = resourceSpec;
+    const {name: resourceName, query: _resourceQuery} = resourceSpec;
+    const resourceQuery = _resourceQuery || '';
     const sourcePath = path.resolve(context, resourceName);
     const sourceRequest = `${sourcePath}${resourceQuery}`;
 
@@ -280,21 +297,34 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
     }
 
     function resolveOneLoader(resolveOpts, spec) {
-        return resolveAsPromised(spec.name, resolveOpts)
-            .then((resolvedModulePath) => {
-                return new Promise((fulfill) => {
-                    require.ensure([resolvedModulePath], (req) => {
-                        const query = (spec.query || '').trim();
-                        fulfill(Object.assign({}, spec, {
-                            query,
-                            path: resolvedModulePath,
-                            module: req(resolvedModulePath),
-                            data: {},
-                            request: `${resolvedModulePath}${query}`
-                        }));
+        const modulePromise = spec.module
+            ? Promise.resolve({
+                path: `<inline ${spec.name}>`,
+                name: spec.name,
+                module: spec.module
+            })
+            : resolveAsPromised(spec.name, resolveOpts)
+                .then((resolvedModulePath) => {
+                    return new Promise((fulfill) => {
+                        require.ensure([resolvedModulePath], (req) => {
+                            fulfill({
+                                path: resolvedModulePath,
+                                name: spec.name,
+                                module: req(resolvedModulePath)
+                            });
+                        });
                     });
                 });
-            });
+
+        return modulePromise.then((fields) => {
+            const query = (spec.query || '').trim();
+            const modulePath = fields.path;
+            return Object.assign({}, spec, {
+                query,
+                request: `${modulePath}${query}`,
+                data: {}
+            }, fields);
+        });
     }
 
     function resolveLoaders(packageData) {
@@ -344,8 +374,6 @@ function transpile({rootDir: _rootDir, context: _context, resourceSpec, loaderSp
                         emitWarning: () => {},  // TODO: Collect and emit Warnings
                         emitError: () => {},  // TODO: Collect and emit Errors
                         exec: unimplemented('The "exec" loader utility'),
-                        // TODO: resolve and resolveSync basically looks like it's just doing this entire function,
-                        // plus parsing, to turn a "require" expression into a string.
                         loaderIndex,
                         inputValue,
                         async: () => callback
