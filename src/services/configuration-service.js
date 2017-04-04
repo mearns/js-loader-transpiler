@@ -220,13 +220,13 @@ class Handler {
         return path.join(destDir, source.relativePath);
     }
 
-    _getOutputGenerator(source, handlerContext, getTransformation) {
+    _getOutputGenerator(source, handlerContext, getOutput) {
         return this._getDestination(this.getDefaultDestination(handlerContext), handlerContext)
             .then((destinationPath) => {
                 const baseOutputGenerator = new OutputGenerator(this._options, source, destinationPath);
                 return Object.assign(baseOutputGenerator, {
                     generateOutput: () => {
-                        return getTransformation()
+                        return getOutput()
                             .then(({content}) => {
                                 return mkdirpAsPromised(path.dirname(destinationPath))
                                     .then(() => Promise.resolve(mzfs.writeFile(destinationPath, content)))
@@ -243,39 +243,49 @@ class Handler {
             });
     }
 
-    getOutputGeneratorsForSource(source) {
-        // TODO: Fill in handler context.
-        const handlerContext = Object.assign({}, this._baseHandlerContext, {
-            source,
-            resource: source.absolutePath,
-            resourcePath: source.absolutePath,
-            resourceQuery: ''
-        });
+    _getOutputGeneratorsForSource(source, baseHandlerContext, getInput) {
+        const handlerContext = Object.assign({}, baseHandlerContext);
         return this._satisfied(source.absolutePath, handlerContext)
             .then((satisfied) => {
                 if (satisfied) {
                     const getTransformation = R.memoize(() => {
-                        return source.getContentString()
-                            .then((content) => this.transform(handlerContext, {content}));
+                        return getInput().then((input) => this.transform(handlerContext, input));
+                    });
+                    const promiseForBaseGenerators = this._getOutputGenerator(source, handlerContext, getTransformation)
+                        .then((gen) => [gen]);
+
+                    const promisesForForkGenerators = this._forks.map((fork) => {
+                        return fork._getOutputGeneratorsForSource(source, handlerContext, getTransformation);
                     });
 
-                    return Promise.all([
-                        this._getOutputGenerator(source, handlerContext, getTransformation),
-                        ...(this._forks.map((fork) => {
-                            // FIXME: this still isn't right, because it won't recurse into fork's forks.
-                            const forkHandlerContext = Object.assign({}, handlerContext);
-                            const getForkTransformation = R.memoize(() => {
-                                return getTransformation()
-                                    .then((input) => fork.transform(forkHandlerContext, input));
-                            });
-                            return fork._getOutputGenerator(source, forkHandlerContext, getForkTransformation);
-                        }))
-                    ]);
+                    const promisesForAllGeneratorLists = [promiseForBaseGenerators, ...promisesForForkGenerators];
+
+                    return Promise.all(promisesForAllGeneratorLists)
+                        .then((listOfListsOfPromisesForOutputGenerators) => {
+                            return Promise.all(_.flatten(listOfListsOfPromisesForOutputGenerators));
+                        });
                 }
                 else {
                     return [];
                 }
             });
+    }
+
+    getOutputGeneratorsForSource(source) {
+        // TODO: Fill in handler context.
+        const baseHandlerContext = Object.assign({}, this._baseHandlerContext, {
+            source,
+            resource: source.absolutePath,
+            resourcePath: source.absolutePath,
+            resourceQuery: ''
+        });
+
+        const getInput = () => {
+            return source.getContentString()
+                .then((content) => ({content}));
+        };
+
+        return this._getOutputGeneratorsForSource(source, baseHandlerContext, getInput);
     }
 
     /**
