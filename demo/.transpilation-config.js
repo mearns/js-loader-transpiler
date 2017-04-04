@@ -176,9 +176,16 @@ configuration = {
 
                         fork: [
                             {
+                                test: /foo/,
                                 destination: (relativePath) => `${relativePath}.length`,
                                 use: [
                                     (content) => String(content.length)
+                                ],
+                                fork: [
+                                    {
+                                        destination: (relativePath) => `${relativePath}.length.json`,
+                                        use: ['json-loader']
+                                    }
                                 ]
                             }
                         ]
