@@ -212,11 +212,35 @@ class Handler {
             data: {},
             destDir: this._destDir
         };
-        this._useEntries = handlerDef.use.map((useEntry) => new UseEntry(options, useEntry));
+        this._useEntries = (handlerDef.use || []).map((useEntry) => new UseEntry(options, useEntry));
+        this._forks = (handlerDef.fork || []).map((fork) => new Handler(options, destDir, fork));
     }
 
     getDefaultDestination({destDir, source}) {
         return path.join(destDir, source.relativePath);
+    }
+
+    _getOutputGenerator(source, handlerContext, getTransformation) {
+        return this._getDestination(this.getDefaultDestination(handlerContext), handlerContext)
+            .then((destinationPath) => {
+                const baseOutputGenerator = new OutputGenerator(this._options, source, destinationPath);
+                return Object.assign(baseOutputGenerator, {
+                    generateOutput: () => {
+                        return getTransformation()
+                            .then(({content}) => {
+                                return mkdirpAsPromised(path.dirname(destinationPath))
+                                    .then(() => Promise.resolve(mzfs.writeFile(destinationPath, content)))
+                                    .catch((error) => {
+                                        throw wrapError(error,
+                                            'Failed trying to write destination file: {messsage}');
+                                    });
+                            })
+                            .tap(() => {
+                                this._options.log.info(`Generated ${destinationPath}`);
+                            });
+                    }
+                });
+            });
     }
 
     getOutputGeneratorsForSource(source) {
@@ -230,45 +254,55 @@ class Handler {
         return this._satisfied(source.absolutePath, handlerContext)
             .then((satisfied) => {
                 if (satisfied) {
-                    return this._getDestination(this.getDefaultDestination(handlerContext), handlerContext)
-                        .then((destinationPath) => [destinationPath]);
+                    const getTransformation = R.memoize(() => {
+                        return source.getContentString()
+                            .then((content) => this.transform(handlerContext, {content}));
+                    });
+
+                    return Promise.all([
+                        this._getOutputGenerator(source, handlerContext, getTransformation),
+                        ...(this._forks.map((fork) => {
+                            // FIXME: this still isn't right, because it won't recurse into fork's forks.
+                            const forkHandlerContext = Object.assign({}, handlerContext);
+                            const getForkTransformation = R.memoize(() => {
+                                return getTransformation()
+                                    .then((input) => fork.transform(forkHandlerContext, input));
+                            });
+                            return fork._getOutputGenerator(source, forkHandlerContext, getForkTransformation);
+                        }))
+                    ]);
                 }
                 else {
                     return [];
                 }
-            })
-            .then((destinationPaths) => {
-                return destinationPaths.map((destinationPath) => {
-                    return Object.assign(Object.create(new OutputGenerator(this._options, source, destinationPath)), {
-                        generateOutput: () => {
-                            const promiseForInitialInput = source.getContentString()
-                                .then((content) => ({content}));
-
-                            const promiseForTransformation = this._useEntries.reduce((promiseForContent, useEntry) => {
-                                return promiseForContent.then((input) => {
-                                    return useEntry.transform(input, handlerContext)
-                                        .catch((error) => {
-                                            throw wrapError(error, 'Failed trying to transform content: {message}');
-                                        });
-                                });
-                            }, promiseForInitialInput);
-
-                            return promiseForTransformation
-                                .then(({content}) => {
-                                    return mkdirpAsPromised(path.dirname(destinationPath))
-                                        .then(() => mzfs.writeFile(destinationPath, content))
-                                        .catch((error) => {
-                                            throw wrapError(error,
-                                                'Failed trying to write destination file: {messsage}');
-                                        });
-                                })
-                                .tap(() => {
-                                    this._options.log.info(`Generated ${destinationPath}`);
-                                });
-                        }
-                    });
-                });
             });
+    }
+
+    /**
+     * Given a handler context and initial input (or promise for initial input), return
+     * a promise to transform that input through all the loaders for this handler (not
+     * including any forks).
+     *
+     * @param  {Object} handlerContext The handler context to pass to the loaders
+     * @param  {Object} initialInput   An object with a required `content` property
+     *                                 containing the String contents to transform,
+     *                                 and an optional `value` property containing the
+     *                                 value corresponding to the content to pass in
+     *                                 to the next loader. Or, this parameter can be
+     *                                 a Promise for such an object.
+     * @return {Promise<Object>}       A Promise for an object similar to that provided
+     *                                 for the `initialInput` parameter, providing the
+     *                                 transformed `content` and (possibly) `value`.
+     */
+    transform(handlerContext, initialInput) {
+        return this._useEntries.reduce((promiseForTransformation, useEntry) => {
+            return promiseForTransformation.then((input) => {
+                return useEntry.transform(input, handlerContext)
+                    .catch((error) => {
+                        throw wrapError(error, 'Failed trying to transform content: {message}');
+                    });
+            });
+        }, Promise.resolve(initialInput));
     }
 }
 

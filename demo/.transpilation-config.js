@@ -34,10 +34,6 @@ configuration = {
         // Rules that define how each input files are transformed into output files.
         handlers: [
             {
-                test: /\.ya?ml$/,
-                use: ['yaml-loader', 'json-loader']
-            },
-            {
                 // ## HandlerContext
                 //
                 // Through out, we refer to an `HandlerContext`, which provides information to various
@@ -176,7 +172,16 @@ configuration = {
                 fork: [
                     {
                         destination: (relativePath) => `${relativePath}.js`,
-                        use: 'json-loader'
+                        use: ['json-loader'],
+
+                        fork: [
+                            {
+                                destination: (relativePath) => `${relativePath}.length`,
+                                use: [
+                                    (content) => String(content.length)
+                                ]
+                            }
+                        ]
                     }
                 ]
             }
