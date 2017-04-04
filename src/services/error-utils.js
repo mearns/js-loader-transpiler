@@ -10,6 +10,16 @@ function formatMessage(fmt, context) {
     }
 }
 
+export function getDeepStackTrace(error) {
+    let trace = error.stack;
+    let nextCause = error.cause;
+    while (nextCause) {
+        trace += `\n  caused by: ${nextCause.stack}\n`;
+        nextCause = nextCause.cause;
+    }
+    return trace;
+}
+
 /**
  * Creates a wrapper Error around the given `error` object, with the specified `fmt`
  * applied to generate the new error message, and the given original `error` attached

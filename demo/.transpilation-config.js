@@ -4,6 +4,10 @@
  * generate modules. The `module.rules` section is therefore moved to `output.handlers`.
  */
 
+/**
+ * Unless otherwise stated, all paths in config properties are resolved relative to the --root-dir,
+ * which defaults to the CWD.
+ */
 configuration = {
     // An array of paths to directories that will be recursively scanned for source files.
     // Relative paths are resolved relative to the --root-dir.
@@ -14,6 +18,8 @@ configuration = {
 
     // A path, resolved relative to the --root-dir. Loaders are resolved based on this.
     // The default is the --root-dir.
+    // TODO: XXX-2: configure resolve() options, including context as basedir.
+    // TODO: XXX-3: Find packageData for resolve() options.
     context: './demo',
 
     // Configures where and how output is generated.
@@ -27,6 +33,10 @@ configuration = {
 
         // Rules that define how each input files are transformed into output files.
         handlers: [
+            {
+                test: /\.ya?ml$/,
+                use: ['yaml-loader', 'json-loader']
+            },
             {
                 // ## HandlerContext
                 //
@@ -162,6 +172,7 @@ configuration = {
                 // The parent handler is applied first, and the output is written to the destination file if appropriate,
                 // then the resulting output is used as _input_ to each of the children handlers. If the parent handler
                 // is not run for an input, then none of the children are applied either.
+                // XXX: Apply fork.
                 fork: [
                     {
                         destination: (relativePath) => `${relativePath}.js`,

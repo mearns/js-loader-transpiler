@@ -7,15 +7,24 @@ import path from 'path';
 import * as mzfs from 'mz/fs';
 import crypto from 'crypto';
 import {OutputGenerator} from './output-generator';
+import resolve from 'resolve';
+import mkdirp from 'mkdirp';
+
+const mkdirpAsPromised = Promise.promisify(mkdirp);
+
+require('require-ensure');
 
 export class Configuration {
 
     constructor(options, {sourceDirs, context, output}) {
         this._options = options;
-        this._sourceDirs = sourceDirs;
-        this._context = context;
-        this._output = output;
-        this._handlers = (output.handlers || []).map((handler) => new Handler(options, output.path, handler));
+        this.resolvePath = (input) => path.resolve(this._options.rootDir, input);
+
+        this._sourceDirs = sourceDirs.map(this.resolvePath);
+        this._context = this.resolvePath(context);
+        options.context = this._context;
+        this._outputPath = this.resolvePath(output.path);
+        this._handlers = (output.handlers || []).map((handler) => new Handler(options, this._outputPath, handler));
     }
 
     /**
@@ -203,6 +212,7 @@ class Handler {
             data: {},
             destDir: this._destDir
         };
+        this._useEntries = handlerDef.use.map((useEntry) => new UseEntry(options, useEntry));
     }
 
     getDefaultDestination({destDir, source}) {
@@ -230,14 +240,153 @@ class Handler {
             .then((destinationPaths) => {
                 return destinationPaths.map((destinationPath) => {
                     return Object.assign(Object.create(new OutputGenerator(this._options, source, destinationPath)), {
-                        generateOutput: function () {
-                            console.log('Generating output', destinationPath);
+                        generateOutput: () => {
+                            const promiseForInitialInput = source.getContentString()
+                                .then((content) => ({content}));
+
+                            const promiseForTransformation = this._useEntries.reduce((promiseForContent, useEntry) => {
+                                return promiseForContent.then((input) => {
+                                    return useEntry.transform(input, handlerContext)
+                                        .catch((error) => {
+                                            throw wrapError(error, 'Failed trying to transform content: {message}');
+                                        });
+                                });
+                            }, promiseForInitialInput);
+
+                            return promiseForTransformation
+                                .then(({content}) => {
+                                    return mkdirpAsPromised(path.dirname(destinationPath))
+                                        .then(() => mzfs.writeFile(destinationPath, content))
+                                        .catch((error) => {
+                                            throw wrapError(error,
+                                                'Failed trying to write destination file: {messsage}');
+                                        });
+                                })
+                                .tap(() => {
+                                    this._options.log.info(`Generated ${destinationPath}`);
+                                });
                         }
                     });
                 });
             });
     }
 }
+
+class UseEntry {
+    constructor(options, useEntry) {
+        this._options = options;
+        if (typeof useEntry === 'object') {
+            const {loader, options: _loaderOptions = {}, ident, __strict__ = true} = useEntry;
+            if (__strict__) {
+                const removeKnownKeys = R.without(['loader', 'options', 'ident', '__strict__']);
+                const unknownKeys = removeKnownKeys(Object.keys(useEntry));
+                if (unknownKeys.length) {
+                    throw new Error(`Unknown keys in strict use entry: ${unknownKeys.join(', ')}`);
+                }
+            }
+
+            this._loader = Loader.getLoader(options, loader);
+            this._loaderOptions = _loaderOptions;
+            this._ident = ident;
+        }
+        else {
+            this._loaderOptions = {};
+            this._loader = Loader.getLoader(options, useEntry);
+            this._ident = null; // TODO: Implement ident.
+        }
+    }
+
+    transform(input, handlerContext) {
+        return this._loader.asPromised()
+            .catch((error) => {
+                throw wrapError(error, `Error importing loader module for ${this._ident}: {message}`);
+            })
+            .then((loader) => {
+                const {
+                    content: inputContent,
+                    value: inputValue
+                } = input;
+
+                const loaderContext = Object.assign({}, handlerContext, {
+                    data: {},
+                    options: this._loaderOptions,
+                    inputValue
+                });
+
+                let fulfill, reject;
+                const promise = new Promise((_fulfill, _reject) => {
+                    fulfill = _fulfill;
+                    reject = _reject;
+                });
+                function callback(error, newContent) {
+                    if (error) {
+                        reject(error);
+                    }
+                    else {
+                        fulfill({
+                            content: String(newContent),
+                            value: loaderContext.value
+                        });
+                    }
+                }
+                try {
+                    const newContent = loader.bind(loaderContext)(inputContent);
+                    if (!_.isUndefined(newContent)) {
+                        callback(null, newContent);
+                    }
+                }
+                catch (error) {
+                    throw wrapError(error, `Error applying loader ${this._ident}: {message}`);
+                }
+
+                return promise;
+            });
+    }
+}
+
+const resolveAsPromised = Promise.promisify(resolve);
+
+function importNamedModule(name, resolveOpts) {
+    return resolveAsPromised(name, resolveOpts)
+        .then((resolvedModulePath) => {
+            return new Promise((fulfill) => {
+                require.ensure([resolvedModulePath], (req) => fulfill(req(resolvedModulePath)));
+            });
+        });
+}
+
+class Loader {
+    constructor(options, loaderDef) {
+        const resolveOpts = {
+            // TODO: These
+            // package: packageData,
+            basedir: options.context
+        };
+
+        switch (typeof loaderDef) {
+            case 'function':
+                this._promiseForLoader = Promise.resolve(loaderDef);
+                break;
+
+            case 'string':
+                this._promiseForLoader = importNamedModule(loaderDef, resolveOpts)
+                    .catch((error) => {
+                        throw wrapError(error, `Error attempting to import loader '${loaderDef}': {message}`);
+                    });
+                break;
+
+            default:
+                throw new Error(`Unexpected loader definition: ${loaderDef}`);
+        }
+    }
+
+    asPromised() {
+        return this._promiseForLoader;
+    }
+}
+Loader.getLoader = function (options, loaderDef) {
+    return new Loader(options, loaderDef);
+};
 
 class SourceFile {
 
@@ -247,16 +396,18 @@ class SourceFile {
         this.sourceDir = sourceDir;
         this.size = (stats && stats.size) ? stats.size : null;
         this.content = null;
+        this.contentString = null;
         this.hash = null;
 
         this._promiseForContent = null;
+        this._promiseForContentString = null;
         this._promiseForHash = null;
         this._promiseForSize = null;
     }
 
     getContent() {
         if (this._promiseForContent === null) {
-            this._promiseForContent = mzfs.readFile(this.absolutePath)
+            this._promiseForContent = Promise.resolve(mzfs.readFile(this.absolutePath))
                 .then((content) => {
                     this.content = content;
                     return content;
@@ -265,11 +416,22 @@ class SourceFile {
         return this._promiseForContent;
     }
 
+    getContentString() {
+        if (this._promiseForContentString === null) {
+            this._promiseForContentString = this.getContent()
+                .then((content) => {
+                    this.contentString = this.bufferToString(content);
+                    return this.contentString;
+                });
+        }
+        return this._promiseForContentString;
+    }
+
     getHash() {
         if (this._promiseForHash === null) {
-            this._promiseForHash = this.getContent()
-                .then((content) => {
-                    this.hash = this.hashBuffer(content);
+            this._promiseForHash = this.getContentString()
+                .then((str) => {
+                    this.hash = this.hashString(str);
                     return this.hash;
                 });
         }
@@ -278,7 +440,7 @@ class SourceFile {
 
     getSize() {
         if (this._promiseForSize === null) {
-            this._promiseForSize = mzfs.stat(this.absolutePath)
+            this._promiseForSize = Promise.resolve(mzfs.stat(this.absolutePath))
                 .then((stats) => {
                     this.size = stats.size;
                     return this.size;
@@ -287,9 +449,13 @@ class SourceFile {
         return this._promiseForSize;
     }
 
-    hashBuffer(buffer) {
+    hashString(str) {
         const hash = crypto.createHash('sha256');
-        hash.update(buffer.toString('utf-8'));
+        hash.update(str);
         return hash.digest('hex');
+    }
+
+    bufferToString(buffer) {
+        return buffer.toString('utf-8');
     }
 }

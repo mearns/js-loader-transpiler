@@ -2,6 +2,8 @@ import Promise from 'bluebird';
 import _ from 'lodash';
 import R from 'ramda';
 import {Configuration} from './services/configuration-service';
+import {wrapError, getDeepStackTrace} from './services/error-utils';
+import process from 'process';
 
 const lengthGreaterThanOne = (list) => list.length > 1; // eslint-disable-line no-magic-numbers
 const getOutputGeneratorDestination = (gen) => gen.getDestination();
@@ -48,5 +50,17 @@ export function main(options, promisesForConfigs) {
             const outputGenerators = _.flatten(outputGeneratorLists);
             assertNoMultiplyTargetedDestinations(options, outputGenerators);
             return Promise.map(outputGenerators, (gen) => gen.generateOutput());
+        })
+        .catch((originalError) => {
+            const error = wrapError(originalError, 'Error transpiling content: {message}');
+            process.exitCode = 1;
+
+            if (options.debug) {
+                console.error(getDeepStackTrace(error));    // eslint-disable-line no-console
+                throw error;
+            }
+            else {
+                console.error(error.message);       // eslint-disable-line no-console
+            }
         });
 }
