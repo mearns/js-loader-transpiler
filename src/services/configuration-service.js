@@ -215,6 +215,7 @@ class Handler {
         this._useEntries = (handlerDef.use || []).map((useEntry) => new UseEntry(options, useEntry));
 
         const parentLoaders = parent ? parent.getLoaders() : [];
+        this._initialLoaderIndex = parentLoaders.length;
         this._loaders = parentLoaders.concat(this._useEntries.map((useEntry) => useEntry.getLoaderDescription()));
 
         this._forks = (handlerDef.fork || []).map((fork) => new Handler(options, destDir, fork, this));
@@ -313,11 +314,12 @@ class Handler {
      *                                 for the `initialInput` parameter, providing the
      *                                 transformed `content` and (possibly) `value`.
      */
-    transform(handlerContext, initialInput) {
-        return this._useEntries.reduce((promiseForTransformation, useEntry) => {
+    transform(handlerContext, initialInput, initialLoaderIndex = this._initialLoaderIndex) {
+        return this._useEntries.reduce((promiseForTransformation, useEntry, index) => {
             return promiseForTransformation.then((input) => {
                 const loaderContext = Object.assign({}, handlerContext, {
-                    cacheable: () => {} // TODO: Implement caching.
+                    cacheable: () => {},    // TODO: Implement caching.
+                    loaderIndex: initialLoaderIndex + index
                 });
                 return useEntry.transform(input, loaderContext)
                     .catch((error) => {
