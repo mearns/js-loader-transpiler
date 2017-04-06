@@ -35,7 +35,11 @@ configuration = {
         handlers: [
             {
                 test: /\.js$/i,
-                use: ['babel-loader'],
+                use: ['babel-loader']
+            },
+            {
+                test: /\.hbs$/i,
+                use: ['handlebars-loader']
             },
             {
                 // ## HandlerContext

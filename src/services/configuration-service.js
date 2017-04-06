@@ -280,6 +280,13 @@ class Handler {
             });
     }
 
+    resolve(context, request, callback) {
+        this._options.log.debug(`Resolving request for ${request}, relative to: ${context}`);
+        // TODO: Parse loaders from the request, create a new handler from it, and transform
+        // the source specified by the request through it.
+        callback(new Error('The `resolve` API function has not been implemented yet by rosetta'));
+    }
+
     getOutputGeneratorsForSource(source) {
         // TODO: Fill in handler context.
         const baseHandlerContext = Object.assign({}, this._baseHandlerContext, {
@@ -287,7 +294,8 @@ class Handler {
             resource: source.absolutePath,
             resourcePath: source.absolutePath,
             resourceQuery: '',
-            loaders: this._loaders
+            loaders: this._loaders,
+            resolve: (...args) => this.resolve(...args)
         });
 
         const getInput = () => {
