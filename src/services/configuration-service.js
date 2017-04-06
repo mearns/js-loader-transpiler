@@ -202,7 +202,7 @@ Condition.cast = function (c) {
 };
 
 class Handler {
-    constructor(options, destDir, handlerDef) {
+    constructor(options, destDir, handlerDef, parent = null) {
         this._options = options;
         this._destDir = destDir;
         this._condition = Condition.cast(_.pick(handlerDef, ['test', 'include', 'exclude']));
@@ -213,7 +213,15 @@ class Handler {
             destDir: this._destDir
         };
         this._useEntries = (handlerDef.use || []).map((useEntry) => new UseEntry(options, useEntry));
-        this._forks = (handlerDef.fork || []).map((fork) => new Handler(options, destDir, fork));
+
+        const parentLoaders = parent ? parent.getLoaders() : [];
+        this._loaders = parentLoaders.concat(this._useEntries.map((useEntry) => useEntry.getLoaderDescription()));
+
+        this._forks = (handlerDef.fork || []).map((fork) => new Handler(options, destDir, fork, this));
+    }
+
+    getLoaders() {
+        return this._loaders;
     }
 
     getDefaultDestination({destDir, source}) {
@@ -277,7 +285,8 @@ class Handler {
             source,
             resource: source.absolutePath,
             resourcePath: source.absolutePath,
-            resourceQuery: ''
+            resourceQuery: '',
+            loaders: this._loaders
         });
 
         const getInput = () => {
@@ -307,7 +316,10 @@ class Handler {
     transform(handlerContext, initialInput) {
         return this._useEntries.reduce((promiseForTransformation, useEntry) => {
             return promiseForTransformation.then((input) => {
-                return useEntry.transform(input, handlerContext)
+                const loaderContext = Object.assign({}, handlerContext, {
+                    cacheable: () => {} // TODO: Implement caching.
+                });
+                return useEntry.transform(input, loaderContext)
                     .catch((error) => {
                         throw wrapError(error, 'Failed trying to transform content: {message}');
                     });
@@ -320,9 +332,9 @@ class UseEntry {
     constructor(options, useEntry) {
         this._options = options;
         if (typeof useEntry === 'object') {
-            const {loader, options: _loaderOptions = {}, ident, __strict__ = true} = useEntry;
+            const {loader, options: _loaderOptions = {}, ident, query = '', __strict__ = true} = useEntry;
             if (__strict__) {
-                const removeKnownKeys = R.without(['loader', 'options', 'ident', '__strict__']);
+                const removeKnownKeys = R.without(['loader', 'options', 'ident', 'query', '__strict__']);
                 const unknownKeys = removeKnownKeys(Object.keys(useEntry));
                 if (unknownKeys.length) {
                     throw new Error(`Unknown keys in strict use entry: ${unknownKeys.join(', ')}`);
@@ -331,13 +343,28 @@ class UseEntry {
 
             this._loader = Loader.getLoader(options, loader);
             this._loaderOptions = _loaderOptions;
+            this._query = query;
             this._ident = ident;
         }
         else {
             this._loaderOptions = {};
+            // TODO: If useEntry is a string, parse query from it.
             this._loader = Loader.getLoader(options, useEntry);
+            this._query = '';
             this._ident = null; // TODO: Implement ident.
         }
+    }
+
+    getLoaderDescription() {
+        return this._loader.getLoaderDescription()
+            .then(({path: modulePath, module}) => {
+                return {
+                    path: modulePath,
+                    request: modulePath,
+                    query: this._query,
+                    module
+                };
+            });
     }
 
     transform(input, handlerContext) {
@@ -354,7 +381,8 @@ class UseEntry {
                 const loaderContext = Object.assign({}, handlerContext, {
                     data: {},
                     options: this._loaderOptions,
-                    inputValue
+                    inputValue,
+                    callback
                 });
 
                 let fulfill, reject;
@@ -390,13 +418,10 @@ class UseEntry {
 
 const resolveAsPromised = Promise.promisify(resolve);
 
-function importNamedModule(name, resolveOpts) {
-    return resolveAsPromised(name, resolveOpts)
-        .then((resolvedModulePath) => {
-            return new Promise((fulfill) => {
-                require.ensure([resolvedModulePath], (req) => fulfill(req(resolvedModulePath)));
-            });
-        });
+function importModuleFromPath(modulePath) {
+    return new Promise((fulfill) => {
+        require.ensure([modulePath], (req) => fulfill(req(modulePath)));
+    });
 }
 
 class Loader {
@@ -408,18 +433,36 @@ class Loader {
         switch (typeof loaderDef) {
             case 'function':
                 this._promiseForLoader = Promise.resolve(loaderDef);
+                this._pathAsPromised = Promise.resolve('<inline>');
                 break;
 
             case 'string':
-                this._promiseForLoader = importNamedModule(loaderDef, resolveOpts)
+                this._pathAsPromised = resolveAsPromised(loaderDef, resolveOpts);
+                this._promiseForLoader = this._pathAsPromised
                     .catch((error) => {
-                        throw wrapError(error, `Error attempting to import loader '${loaderDef}': {message}`);
+                        throw wrapError(error, `Error attempting to resolve loader '${loaderDef}': {message}`);
+                    })
+                    .then((modulePath) => {
+                        return importModuleFromPath(modulePath)
+                            .catch((error) => {
+                                throw wrapError(error, `Error attempting to import loader '${loaderDef}': {message}`);
+                            });
                     });
                 break;
 
             default:
                 throw new Error(`Unexpected loader definition: ${loaderDef}`);
         }
+    }
+
+    getLoaderDescription() {
+        return Promise.join(
+            this._pathAsPromised,
+            this._promiseForLoader,
+            (modulePath, module) => {
+                return {path: modulePath, module};
+            }
+        );
     }
 
     asPromised() {

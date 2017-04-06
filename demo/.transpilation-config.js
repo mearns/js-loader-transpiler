@@ -34,6 +34,10 @@ configuration = {
         // Rules that define how each input files are transformed into output files.
         handlers: [
             {
+                test: /\.js$/i,
+                use: ['babel-loader'],
+            },
+            {
                 // ## HandlerContext
                 //
                 // Through out, we refer to an `HandlerContext`, which provides information to various
