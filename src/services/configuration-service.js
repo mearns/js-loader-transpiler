@@ -384,7 +384,8 @@ class UseEntry {
                     data: {},
                     options: this._loaderOptions,
                     inputValue,
-                    callback
+                    callback,
+                    async: () => callback
                 });
 
                 let fulfill, reject;
